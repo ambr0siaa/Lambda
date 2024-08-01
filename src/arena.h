@@ -35,13 +35,25 @@ void *arena_realloc(Arena *arena, void *old_ptr, size_t old_size, size_t new_siz
 #define arena_da_append(a, da, item, c) \
     do { \
         if ((da)->count + 1 >= (da)->capacity) { \
-            size_t old_size = (da)->capacity * sizeof(*(da)->items); \
-            size_t new_size = (da)->capacity == 0 ? (c) : (da)->capacity * 2; \
-            new_size *= sizeof(*(da)->items); \
-            (da)->items = arena_realloc((a), (da)->items, old_size, new_size); \
+            size_t old_size = (da)->capacity*sizeof(*(da)->items); \
+            size_t new_size = (da)->capacity == 0 ? (c) : (da)->capacity*2; \
+            (da)->items = arena_realloc((a), (da)->items, old_size, new_size*sizeof(*(da)->items)); \
             (da)->capacity = new_size; \
         } \
         (da)->items[(da)->count++] = (item); \
     } while(0)
+
+#define arena_da_append_many(a, da, item, item_count, c) \
+    do { \
+        if ((da)->count + (item_count) >= (da)->capacity) { \
+            size_t old_size = (da)->capacity*sizeof(*(da)->items); \
+            size_t new_size = (da)->capacity == 0 ? (c) : (da)->capacity; \
+            while ((da)->count + (item_count) >= new_size) { new_size *= 2; } \
+            (da)->items = arena_realloc((a), (da)->items, old_size, new_size*sizeof(*(da)->items)); \
+            (da)->capacity = new_size; \
+        } \
+        memcpy((da)->items + (da)->count, (item), (item_count)*sizeof(*(da)->items)); \
+        (da)->count += (item_count); \
+    } while(0) 
 
 #endif // ARENA_H_
