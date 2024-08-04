@@ -1,3 +1,4 @@
 /bin
 /ignored
 .lambda_history
+src/test.c

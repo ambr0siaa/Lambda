@@ -1,86 +1,87 @@
-/*
- * It's my version of `readline` library
- * For now it's just testing file. All common fitures not implemented
- */
-
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <assert.h>
-
+#include <stdarg.h>
 #include <unistd.h>
-#include <termios.h>
-#include <fcntl.h>
 
-#include "arena.h"
+#include "readline.h"
 
-#define CTRL_KEY(k) ((k) & 0x1f)
-#define INSBUFF_INIT_CAPACITY 32
+RLAPI void reader_print(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stdout, fmt, args);
+    fflush(stdout);
+    va_end(args);
+}
 
-#define READER_STATUS_OK  1
-#define READER_STATUS_ERR 2
-#define READER_STATUS_EXT 3
-#define READER_STATUS_CON 0
-
-// Dynamic array of characters
-typedef struct {
-    size_t capacity;
-    size_t count;
-    char *items;
-} Buffer;
-
-typedef enum {
-    EVENT_NONE = 0,
-    EVENT_CUR_LEFT,
-    EVENT_CUR_RIGHT,
-    EVENT_HIS_PREV,
-    EVENT_HIS_NEXT,
-    EVENT_WRITE_CHAR,
-    EVENT_BACKSPACE,
-    EVENT_NEWLINE,
-    EVENT_EXIT
-} Event;
-
-typedef struct {
-    char c;              // Current character
-    int status;          // Event status
-    size_t pos;          // Cursor possition
-    Buffer buf;          // Output text
-    Event event;         // Current event
-    struct termios term; // Original terminal setup
-} Reader;
-
-#define buff_append(a, ib, item) \
-    arena_da_append(a, ib, item, INSBUFF_INIT_CAPACITY)
-
-#define reader_break(r) \
-    ((r)->status = READER_STATUS_ERR)
-
-#define reader_statusok(r) \
-    ((r)->status == READER_STATUS_OK)
-
-#define reader_statuserr(r) \
-    ((r)->status == READER_STATUS_ERR)
-
-#define reader_statuscon(r) \
-    ((r)->status == READER_STATUS_CON)
-
-#define reader_statusext(r) \
-    ((r)->status == READER_STATUS_EXT)
+#define reader_draw_cursor(r) reader_print("\x1b[%zu;%zuH", (r)->cy, (r)->cx);
 
 #define reader_retline(r) \
     do { \
-        char nul = '\0'; \
-        buff_append(a, &(r)->buf, nul); \
+        buff_insert(&(r)->buf, '\0', (r)->buf.count); \
         return (r)->buf.items; \
     } while (0)
 
-void reader_defaultmode(Reader *r)
+RLAPI void buff_insert(Buffer *buf, char item, size_t index)
+{
+    if (index >= 0 && index <= buf->count) {
+        Buffer new = {0};
+        new.count = buf->count + 1;
+        new.capacity = buf->capacity > 0 ? buf->capacity : BUFF_INIT_CAPACITY;
+        new.capacity = new.capacity < new.count ? new.capacity*2 : new.capacity;
+        new.items = malloc(new.capacity);
+
+        new.items[index] = item;
+        memcpy(new.items, buf->items, index);
+        memcpy(new.items + index + 1, buf->items + index, buf->count - index);
+        
+        new.items[new.count] = '\0';
+        free(buf->items);
+        *buf = new;
+    }
+}
+
+RLAPI void buff_delete(Buffer *buf, char index)
+{
+    Buffer new = {0};
+    new.count = buf->count - 1;
+    new.capacity = buf->count * 2;
+    new.items = malloc(new.capacity);
+    memset(new.items, '\0', new.capacity);
+
+    memcpy(new.items, buf->items, index);
+    memcpy(new.items + index, buf->items + index + 1, buf->count - index - 1);
+
+    free(buf->items);
+    *buf = new;
+}
+
+RLAPI int reader_cursor_pos(size_t *y, size_t *x)
+{
+    char buf[32];
+    size_t i = 0;
+   
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+    
+    while (i < sizeof(buf) - 1) {
+        if (read(STDIN_FILENO, &buf[i], 1) != 1 || buf[i] == 'R') break;
+        ++i;
+    }
+
+    buf[i] = '\0';
+
+    if (buf[0] != '\x1b' || buf[1] != '[') return 0;
+    if (sscanf(&buf[2], "%zu;%zu", y, x) != 2) return 0;
+
+    return 1;
+}
+
+RLAPI void reader_defaultmode(Reader *r)
 {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &r->term);
 }
 
-void reader_readmode(Reader *r)
+RLAPI void reader_readmode(Reader *r)
 {
     tcgetattr(STDIN_FILENO, &r->term);
     struct termios t = r->term;
@@ -94,33 +95,33 @@ void reader_readmode(Reader *r)
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &t);
 }
 
-Reader reader_init(const char *prompt)
+RLAPI Reader reader_init(const char *prompt)
 {
     Reader r = {0};
     r.status = READER_STATUS_CON;
-    r.c = r.pos = r.event = 0;
-  
-    size_t len = strlen(prompt);
-    write(STDOUT_FILENO, prompt, len);
+    r.ch = r.cx = r.cy = r.event = 0;
+    r.offset = prompt != NULL ? strlen(prompt) : 0;
 
     reader_readmode(&r);
+    reader_cursor_pos(&r.cy, &r.cx);
+    r.cx += r.offset;
+    
     return r;
 }
 
-void reader_readchar(Reader *r)
+RLAPI void reader_readchar(Reader *r)
 {
     ssize_t n = 0;
-    while ((n = read(STDIN_FILENO, &r->c, 1)) != 1)
+    while ((n = read(STDIN_FILENO, &r->ch, 1)) != 1)
         if (n == -1) reader_break(r);
 }
 
-void reader_handle_event(Reader *r)
+RLAPI void reader_handle_event(Reader *r)
 {
     reader_readchar(r);
     if (reader_statuserr(r)) return;
     
-    switch (r->c) {
-
+    switch (r->ch) {
         case CTRL_KEY('q'): {
             r->event = EVENT_EXIT;
             return;
@@ -129,7 +130,7 @@ void reader_handle_event(Reader *r)
             r->event = EVENT_NEWLINE;
             return;
         }
-        case '\b': {
+        case '\x8': case '\x7f': {
             r->event = EVENT_BACKSPACE;
             return;
         }
@@ -155,41 +156,59 @@ void reader_handle_event(Reader *r)
     r->event = EVENT_WRITE_CHAR;
 }
 
-void reader_movecursor(Reader *r, int direct)
+RLAPI char *reader_doevent(Reader *r)
 {
-    char cursor[5];
-    if (direct) {
-        snprintf(cursor, 5, "\x1b[%dC", 1);
-        r->pos += 1;
-    } else {
-        snprintf(cursor, 5, "\x1b[%dD", 1); 
-        r->pos -= 1;
-    }
-    write(STDOUT_FILENO, cursor, 5);
-}
+    size_t left_boundary = r->cx > r->offset + 1;
+    size_t right_boundary = r->cx <= r->buf.count + r->offset;
 
-char *reader_doevent(Arena *a, Reader *r)
-{
     switch (r->event) {
         case EVENT_NEWLINE: {
-            printf("\n");
+            reader_print("\n");
             r->status = READER_STATUS_OK;
             reader_retline(r);
         }
         case EVENT_WRITE_CHAR: {
-            write(STDOUT_FILENO, &r->c, 1);
-            buff_append(a, &r->buf, r->c);
-            r->pos += 1;
+            size_t pos = r->cx;
+            buff_insert(&r->buf, r->ch, pos - r->offset - 1);
+
+            r->cx -= (pos - r->offset - 1);
+            reader_draw_cursor(r);
+
+            reader_print("%s", r->buf.items);
+
+            r->cx = pos + 1;
+            reader_draw_cursor(r);
+        
+            break;
+        }
+        case EVENT_BACKSPACE: {
+            if (left_boundary && right_boundary + 1) {
+                size_t pos = r->cx;
+                buff_delete(&r->buf, pos - r->offset - 2);
+
+                r->cx -= (pos - r->offset - 1);
+                reader_draw_cursor(r);
+                reader_print("\x1b[K");
+
+                reader_print("%s", r->buf.items);
+
+                r->cx = pos - 1;
+                reader_draw_cursor(r);
+            }
             break;
         }
         case EVENT_CUR_LEFT: {
-            if (r->pos > 0)
-                reader_movecursor(r, 0);
+            if (left_boundary) {
+                r->cx -= 1;
+                reader_draw_cursor(r);
+            }
             break;
         }
         case EVENT_CUR_RIGHT: {
-            if (r->pos < r->buf.count)
-                reader_movecursor(r, 1);
+            if (right_boundary) {
+                r->cx += 1;
+                reader_draw_cursor(r);
+            }
             break;
         }
         case EVENT_EXIT: {
@@ -205,40 +224,19 @@ char *reader_doevent(Arena *a, Reader *r)
     return NULL;
 }
 
-char *readline(Arena *a, const char *prompt)
+char *readline(const char *prompt)
 {
     char *line = NULL;
     Reader r = reader_init(prompt);
+    reader_print(prompt);
 
     while (reader_statuscon(&r)) {
         reader_handle_event(&r);
         if (!reader_statuserr(&r)) {
-            line = reader_doevent(a, &r);
+            line = reader_doevent(&r);
         }
     }
     
     reader_defaultmode(&r);
     return line;
-}
-
-/*
- * TODO:
- *  - Introduce `EVENT_BACKSPACE` and moving cursor
- *  - Introduce history, searching in it and loading
- */
-int main(void)
-{
-    Arena a = {0};
-
-    for (;;) {
-        char *line = readline(&a, "> ");
-        if (line) {
-            printf("%s\n", line);
-        } else {
-            break;
-        }
-    }
-    
-    arena_free(&a);
-    return 0;
 }
